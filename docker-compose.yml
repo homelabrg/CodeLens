@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./services/api-gateway:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+      - PORT=8080
+      - SOURCE_CODE_SERVICE_URL=http://source-code-service:8000
+    depends_on:
+      - source-code-service
+
+  source-code-service:
+    build:
+      context: ./services/source-code-service
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./services/source-code-service:/app
+      - ./data:/data
+    environment:
+      - LOG_LEVEL=DEBUG
+      - CLONE_BASE_PATH=/data/repos
+      - FILES_BASE_PATH=/data/files
+      - DB_PATH=/data/db
+      - ANALYSIS_RESULTS_PATH=/data/analysis
+      - CACHE_DIR=/data/cache
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-sk-dummy-key}
+      - LLM_PROVIDER=ollama  # or "openai"
+      - OLLAMA_API_BASE=http://host.docker.internal:11434
+      - OLLAMA_MODEL=mistral:latest
