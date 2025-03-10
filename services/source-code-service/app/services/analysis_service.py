@@ -65,9 +65,10 @@ class AnalysisService:
         
         return analysis_id
     
+    # Modified run_analysis method in the AnalysisService class to properly update progress
     async def run_analysis(self, analysis_id: str, project_id: str, analysis_types: List[str]):
         """
-        Run analysis job.
+        Run analysis job with proper progress tracking.
         
         Args:
             analysis_id: Analysis job ID
@@ -98,27 +99,55 @@ class AnalysisService:
                 )
                 return
             
-            # Determine total analysis tasks
-            total_tasks = len(analysis_types)
-            completed_tasks = 0
+            # Determine total analysis tasks and subtasks
+            total_analysis_types = len(analysis_types)
+            
+            # Each analysis type consists of multiple steps
+            # We estimate the following number of steps per analysis type:
+            # - code: 2 steps (language summary + file analysis)
+            # - dependencies: 2 steps (dependency analysis + graph generation)
+            # - business: 2 steps (business analysis + entity extraction)
+            # - architecture: 2 steps (architecture analysis + diagram generation)
+            steps_per_analysis = 2
+            total_steps = total_analysis_types * steps_per_analysis
+            completed_steps = 0
+            
+            logger.info(f"Starting analysis job {analysis_id} with {total_steps} total steps")
             results = {}
             
             # Perform each analysis type
-            for analysis_type in analysis_types:
-                # Update progress
-                progress = int((completed_tasks / total_tasks) * 100)
-                self.analysis_db.update_analysis_job(analysis_id, progress=progress)
-                
+            for analysis_index, analysis_type in enumerate(analysis_types):
                 try:
+                    logger.info(f"Starting {analysis_type} analysis")
+                    
+                    # Each analysis type contributes to the overall progress
+                    base_progress = (analysis_index * steps_per_analysis * 100) // total_steps
+                    
+                    # Update progress at the start of each analysis type
+                    self.analysis_db.update_analysis_job(
+                        analysis_id, 
+                        progress=base_progress,
+                        status=f"analyzing_{analysis_type}"
+                    )
+                    logger.info(f"Updated progress to {base_progress}% for analysis {analysis_type}")
+                    
                     # Perform analysis based on type
                     if analysis_type == "code":
-                        result = await self._analyze_code(project_id, files)
+                        result = await self._analyze_code_with_progress(
+                            project_id, files, analysis_id, base_progress, steps_per_analysis, total_steps
+                        )
                     elif analysis_type == "dependencies":
-                        result = await self._analyze_dependencies(project_id, files)
+                        result = await self._analyze_dependencies_with_progress(
+                            project_id, files, analysis_id, base_progress, steps_per_analysis, total_steps
+                        )
                     elif analysis_type == "business":
-                        result = await self._analyze_business(project_id, files)
+                        result = await self._analyze_business_with_progress(
+                            project_id, files, analysis_id, base_progress, steps_per_analysis, total_steps
+                        )
                     elif analysis_type == "architecture":
-                        result = await self._analyze_architecture(project_id, files)
+                        result = await self._analyze_architecture_with_progress(
+                            project_id, files, analysis_id, base_progress, steps_per_analysis, total_steps
+                        )
                     else:
                         logger.warning(f"Unknown analysis type: {analysis_type}")
                         continue
@@ -129,14 +158,22 @@ class AnalysisService:
                     # Save results to file
                     self._save_analysis_results(analysis_id, analysis_type, result)
                     
+                    # Update completed steps
+                    completed_steps += steps_per_analysis
+                    
+                    # Calculate and update progress
+                    progress = (completed_steps * 100) // total_steps
+                    self.analysis_db.update_analysis_job(
+                        analysis_id,
+                        progress=progress
+                    )
+                    logger.info(f"Completed {analysis_type} analysis, progress now at {progress}%")
+                    
                 except Exception as e:
                     logger.error(f"Error performing {analysis_type} analysis: {str(e)}", exc_info=True)
                     results[analysis_type] = {"error": str(e)}
-                
-                # Increment completed tasks
-                completed_tasks += 1
             
-            # Update job with results
+            # Update job with results and mark as completed
             self.analysis_db.update_analysis_job(
                 analysis_id,
                 status="completed",
@@ -144,6 +181,7 @@ class AnalysisService:
                 results=results,
                 completed_at=datetime.utcnow().isoformat()
             )
+            logger.info(f"Analysis job {analysis_id} completed successfully")
             
         except Exception as e:
             logger.error(f"Error running analysis job: {str(e)}", exc_info=True)
@@ -152,14 +190,22 @@ class AnalysisService:
                 status="failed",
                 error=str(e)
             )
-    
-    async def _analyze_code(self, project_id: str, files: List[Dict[str, Any]]) -> Dict[str, Any]:
+
+    # New helper methods for progress tracking in different analysis types
+    async def _analyze_code_with_progress(
+        self, project_id: str, files: List[Dict[str, Any]], 
+        analysis_id: str, base_progress: int, steps_per_analysis: int, total_steps: int
+    ) -> Dict[str, Any]:
         """
-        Analyze code files.
+        Analyze code files with progress tracking.
         
         Args:
             project_id: Project ID
             files: List of files
+            analysis_id: Analysis job ID
+            base_progress: Starting progress percentage for this analysis
+            steps_per_analysis: Number of steps in this analysis type
+            total_steps: Total steps across all analyses
             
         Returns:
             Dict[str, Any]: Analysis results
@@ -178,20 +224,38 @@ class AnalysisService:
                     language_files[lang] = []
                 language_files[lang].append(file)
         
-        # Analyze files by language
+        # Step 1: Analyze files by language (50% of this analysis)
         language_summaries = {}
         file_summaries = {}
         
+        # Update progress after language grouping
+        step_progress = base_progress + ((1 * 100) // total_steps)
+        self.analysis_db.update_analysis_job(analysis_id, progress=step_progress)
+        logger.info(f"Grouped code files by language, progress now at {step_progress}%")
+        
         # Process each language
-        for language, lang_files in language_files.items():
+        languages_count = len(language_files)
+        for i, (language, lang_files) in enumerate(language_files.items()):
             # Get language summary
             prompt = self._create_language_summary_prompt(language, lang_files)
             language_summary = await self.openai_service.analyze_text(prompt)
             language_summaries[language] = language_summary
             
-            # Process a sample of files for each language (up to 10)
+            # Update progress for each language processed
+            language_progress = base_progress + (1 * 100 // total_steps) + (i * 100 // (total_steps * languages_count))
+            self.analysis_db.update_analysis_job(analysis_id, progress=language_progress)
+            logger.info(f"Processed language {language}, progress now at {language_progress}%")
+        
+        # Process a sample of files for each language (up to 10)
+        total_sample_files = 0
+        processed_files = 0
+        
+        for lang_files in language_files.values():
+            total_sample_files += min(len(lang_files), 10)
+        
+        for language, lang_files in language_files.items():
             sample_files = lang_files[:10]
-            for file_info in sample_files:
+            for file_index, file_info in enumerate(sample_files):
                 file_path = file_info.get("path")
                 if file_path:
                     file_content = self.file_service.get_file_content(project_id, file_path)
@@ -200,6 +264,16 @@ class AnalysisService:
                         prompt = self._create_file_summary_prompt(file_path, language, file_content)
                         file_summary = await self.openai_service.analyze_text(prompt)
                         file_summaries[file_path] = file_summary
+                        
+                        # Update progress for each file processed
+                        processed_files += 1
+                        file_progress = step_progress + ((processed_files * 100) // (total_steps * total_sample_files))
+                        self.analysis_db.update_analysis_job(analysis_id, progress=file_progress)
+        
+        # Step completed, update progress
+        final_progress = base_progress + ((steps_per_analysis * 100) // total_steps)
+        self.analysis_db.update_analysis_job(analysis_id, progress=final_progress)
+        logger.info(f"Completed code analysis, progress now at {final_progress}%")
         
         return {
             "language_summaries": language_summaries,
@@ -207,14 +281,22 @@ class AnalysisService:
             "file_count": len(code_files),
             "language_distribution": {lang: len(files) for lang, files in language_files.items()}
         }
-    
-    async def _analyze_dependencies(self, project_id: str, files: List[Dict[str, Any]]) -> Dict[str, Any]:
+
+    # Add similar progress-tracking implementations for other analysis types
+    async def _analyze_dependencies_with_progress(
+        self, project_id: str, files: List[Dict[str, Any]],
+        analysis_id: str, base_progress: int, steps_per_analysis: int, total_steps: int
+    ) -> Dict[str, Any]:
         """
-        Analyze dependencies between code files.
+        Analyze dependencies between code files with progress tracking.
         
         Args:
             project_id: Project ID
             files: List of files
+            analysis_id: Analysis job ID
+            base_progress: Starting progress percentage for this analysis
+            steps_per_analysis: Number of steps in this analysis type
+            total_steps: Total steps across all analyses
             
         Returns:
             Dict[str, Any]: Analysis results
@@ -226,6 +308,15 @@ class AnalysisService:
         
         # Sample files for analysis (up to 20)
         sample_files = code_files[:20]
+        
+        # Update progress
+        step_progress = base_progress + ((1 * 100) // total_steps)
+        self.analysis_db.update_analysis_job(
+            analysis_id,
+            progress=step_progress,
+            status="analyzing_dependencies"
+        )
+        logger.info(f"Selected files for dependency analysis, progress now at {step_progress}%")
         
         # Collect file contents
         file_contents = {}
@@ -240,23 +331,40 @@ class AnalysisService:
         prompt = self._create_dependency_analysis_prompt(file_contents)
         dependency_analysis = await self.openai_service.analyze_text(prompt)
         
+        # Update progress
+        step_progress = base_progress + ((1.5 * 100) // total_steps)
+        self.analysis_db.update_analysis_job(analysis_id, progress=step_progress)
+        logger.info(f"Completed dependency analysis, progress now at {step_progress}%")
+        
         # Generate dependency graph
         graph_prompt = self._create_dependency_graph_prompt(dependency_analysis)
         dependency_graph = await self.openai_service.analyze_text(graph_prompt)
+        
+        # Final update for this analysis type
+        final_progress = base_progress + ((steps_per_analysis * 100) // total_steps)
+        self.analysis_db.update_analysis_job(analysis_id, progress=final_progress)
+        logger.info(f"Completed dependency graph generation, progress now at {final_progress}%")
         
         return {
             "dependencies": dependency_analysis,
             "dependency_graph": dependency_graph,
             "analyzed_files": list(file_contents.keys())
         }
-    
-    async def _analyze_business(self, project_id: str, files: List[Dict[str, Any]]) -> Dict[str, Any]:
+
+    async def _analyze_business_with_progress(
+        self, project_id: str, files: List[Dict[str, Any]],
+        analysis_id: str, base_progress: int, steps_per_analysis: int, total_steps: int
+    ) -> Dict[str, Any]:
         """
-        Analyze business functionality.
+        Analyze business functionality with progress tracking.
         
         Args:
             project_id: Project ID
             files: List of files
+            analysis_id: Analysis job ID
+            base_progress: Starting progress percentage for this analysis
+            steps_per_analysis: Number of steps in this analysis type
+            total_steps: Total steps across all analyses
             
         Returns:
             Dict[str, Any]: Analysis results
@@ -268,6 +376,15 @@ class AnalysisService:
         
         # Sample files for analysis (up to 20)
         sample_files = code_files[:20]
+        
+        # Update progress
+        step_progress = base_progress + ((1 * 100) // total_steps)
+        self.analysis_db.update_analysis_job(
+            analysis_id,
+            progress=step_progress,
+            status="analyzing_business_functionality"
+        )
+        logger.info(f"Selected files for business analysis, progress now at {step_progress}%")
         
         # Collect file contents
         file_contents = {}
@@ -282,23 +399,40 @@ class AnalysisService:
         prompt = self._create_business_analysis_prompt(file_contents)
         business_analysis = await self.openai_service.analyze_text(prompt)
         
+        # Update progress
+        step_progress = base_progress + ((1.5 * 100) // total_steps)
+        self.analysis_db.update_analysis_job(analysis_id, progress=step_progress)
+        logger.info(f"Completed business analysis, progress now at {step_progress}%")
+        
         # Extract business entities
         entity_prompt = self._create_business_entity_prompt(business_analysis)
         business_entities = await self.openai_service.analyze_text(entity_prompt)
+        
+        # Final update for this analysis type
+        final_progress = base_progress + ((steps_per_analysis * 100) // total_steps)
+        self.analysis_db.update_analysis_job(analysis_id, progress=final_progress)
+        logger.info(f"Completed business entity extraction, progress now at {final_progress}%")
         
         return {
             "business_functionality": business_analysis,
             "business_entities": business_entities,
             "analyzed_files": list(file_contents.keys())
         }
-    
-    async def _analyze_architecture(self, project_id: str, files: List[Dict[str, Any]]) -> Dict[str, Any]:
+
+    async def _analyze_architecture_with_progress(
+        self, project_id: str, files: List[Dict[str, Any]],
+        analysis_id: str, base_progress: int, steps_per_analysis: int, total_steps: int
+    ) -> Dict[str, Any]:
         """
-        Analyze architecture.
+        Analyze architecture with progress tracking.
         
         Args:
             project_id: Project ID
             files: List of files
+            analysis_id: Analysis job ID
+            base_progress: Starting progress percentage for this analysis
+            steps_per_analysis: Number of steps in this analysis type
+            total_steps: Total steps across all analyses
             
         Returns:
             Dict[str, Any]: Analysis results
@@ -314,6 +448,15 @@ class AnalysisService:
         # Sample files for analysis (up to 20)
         sample_files = code_files[:20]
         
+        # Update progress
+        step_progress = base_progress + ((1 * 100) // total_steps)
+        self.analysis_db.update_analysis_job(
+            analysis_id,
+            progress=step_progress,
+            status="analyzing_architecture"
+        )
+        logger.info(f"Selected files for architecture analysis, progress now at {step_progress}%")
+        
         # Collect file contents
         file_contents = {}
         for file_info in sample_files:
@@ -327,9 +470,19 @@ class AnalysisService:
         prompt = self._create_architecture_analysis_prompt(project, file_contents)
         architecture_analysis = await self.openai_service.analyze_text(prompt)
         
+        # Update progress
+        step_progress = base_progress + ((1.5 * 100) // total_steps)
+        self.analysis_db.update_analysis_job(analysis_id, progress=step_progress)
+        logger.info(f"Completed architecture analysis, progress now at {step_progress}%")
+        
         # Generate architecture diagram
         diagram_prompt = self._create_architecture_diagram_prompt(architecture_analysis)
         architecture_diagram = await self.openai_service.analyze_text(diagram_prompt)
+        
+        # Final update for this analysis type
+        final_progress = base_progress + ((steps_per_analysis * 100) // total_steps)
+        self.analysis_db.update_analysis_job(analysis_id, progress=final_progress)
+        logger.info(f"Completed architecture diagram generation, progress now at {final_progress}%")
         
         return {
             "architecture_analysis": architecture_analysis,

@@ -4,6 +4,8 @@ from typing import List, Optional, Dict, Any
 import logging
 import uuid
 import os
+from datetime import datetime  # Add this import
+
 from ..services.analysis_service import AnalysisService
 from ..dependencies.service_dependencies import get_analysis_service, get_file_service
 from ..services.file_service import FileService
@@ -12,6 +14,13 @@ from ..dependencies.service_dependencies import get_openai_service
 from ..core.config import settings
 from ..core.logger import setup_logging
 from pydantic import BaseModel
+from ..models.analysis import (
+    AnalysisResponse, 
+    AnalysisResultsResponse, 
+    AnalysisRequest,
+    AnalysisJobCreationResponse
+)
+from ..utils.analysis_formatter import format_analysis_results, extract_key_findings
 
 
 # Setup logging
@@ -175,7 +184,8 @@ async def import_repository_files(repository_id: str) -> Optional[str]:
         logger.error(f"Failed to import repository files: {str(e)}", exc_info=True)
         return None
 
-@router.post("/projects/{project_id}/analyze", response_model=AnalysisResponse)
+# Update the analyze_project endpoint to use the correct response model
+@router.post("/projects/{project_id}/analyze", response_model=AnalysisJobCreationResponse)
 async def analyze_project(
     project_id: str,
     request: AnalysisRequest,
@@ -218,7 +228,8 @@ async def analyze_project(
             analysis_types=request.analysis_types
         )
         
-        return AnalysisResponse(
+        # Return the formatted response
+        return AnalysisJobCreationResponse(
             analysis_id=analysis_id,
             project_id=actual_project_id,
             status="pending",
@@ -250,13 +261,28 @@ async def get_analysis_status(
         Dict: Analysis job information
     """
     try:
+        # Get the analysis data
         analysis_info = analysis_service.get_analysis_job(analysis_id)
         if not analysis_info:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Analysis job with ID {analysis_id} not found"
             )
-        return analysis_info
+
+        # Instead of using the Pydantic model directly, adapt the data to match what's expected
+        # This avoids issues with schema mismatches until we can update all schemas
+        adapted_response = {
+            "analysis_id": analysis_info.get("id"),  # Map id to analysis_id
+            "project_id": analysis_info.get("project_id"),
+            "status": analysis_info.get("status"),
+            "analysis_types": analysis_info.get("analysis_types", []),
+            "progress": analysis_info.get("progress", 0),
+            "message": f"Analysis status: {analysis_info.get('status')}"  # Add a message field
+        }
+        
+        # Return the adapted response directly without model validation
+        return adapted_response
+        
     except HTTPException:
         raise
     except Exception as e:
@@ -264,6 +290,118 @@ async def get_analysis_status(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get analysis status: {str(e)}"
+        )
+
+
+@router.get("/analysis/{analysis_id}/results", response_model=AnalysisResultsResponse)
+async def get_detailed_analysis_results(
+    analysis_id: str,
+    analysis_service: AnalysisService = Depends(get_analysis_service)
+):
+    """
+    Get detailed results of an analysis job.
+    
+    Args:
+        analysis_id: Analysis job ID
+        
+    Returns:
+        AnalysisResultsResponse: Detailed analysis results
+    """
+    try:
+        # Get analysis job info
+        analysis_info = analysis_service.get_analysis_job(analysis_id)
+        if not analysis_info:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Analysis job with ID {analysis_id} not found"
+            )
+        
+        # Check if analysis is completed
+        if analysis_info["status"] != "completed":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Analysis job is not yet completed. Current status: {analysis_info['status']}"
+            )
+        
+        # Get analysis results
+        results = analysis_service.get_analysis_results(analysis_id)
+        if not results:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Analysis results not found for analysis {analysis_id}"
+            )
+        
+        # Combine analysis info and results
+        analysis_data = {**analysis_info, "results": results}
+        
+        # Format results using our utility
+        formatted_results = format_analysis_results(analysis_data)
+        
+        return formatted_results
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get analysis results: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get analysis results: {str(e)}"
+        )
+
+@router.get("/analysis/{analysis_id}/summary")
+async def get_analysis_summary(
+    analysis_id: str,
+    analysis_service: AnalysisService = Depends(get_analysis_service)
+):
+    """
+    Get a summary of analysis results.
+    
+    Args:
+        analysis_id: Analysis job ID
+        
+    Returns:
+        Dict: Summary of analysis findings
+    """
+    try:
+        # Get detailed results
+        analysis_info = analysis_service.get_analysis_job(analysis_id)
+        if not analysis_info:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Analysis job with ID {analysis_id} not found"
+            )
+        
+        # Check if analysis is completed
+        if analysis_info["status"] != "completed":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Analysis job is not yet completed. Current status: {analysis_info['status']}"
+            )
+        
+        # Get analysis results
+        results = analysis_service.get_analysis_results(analysis_id)
+        if not results:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Analysis results not found for analysis {analysis_id}"
+            )
+        
+        # Combine analysis info and results
+        analysis_data = {**analysis_info, "results": results}
+        
+        # Format results
+        formatted_results = format_analysis_results(analysis_data)
+        
+        # Extract key findings
+        summary = extract_key_findings(formatted_results)
+        
+        return summary
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get analysis summary: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get analysis summary: {str(e)}"
         )
 
 @router.get("/projects/{project_id}/analysis")
